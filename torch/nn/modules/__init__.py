@@ -109,6 +109,7 @@ from .loss import (
     TripletMarginLoss,
     TripletMarginWithDistanceLoss,
 )
+from .nfloat import NFloat20Linear, NFloat4Linear
 from .normalization import (
     CrossMapLRN2d,
     GroupNorm,
@@ -278,6 +279,8 @@ __all__ = [
     "MultiLabelSoftMarginLoss",
     "MultiMarginLoss",
     "MultiheadAttention",
+    "NFloat20Linear",
+    "NFloat4Linear",
     "NLLLoss",
     "NLLLoss2d",
     "PReLU",

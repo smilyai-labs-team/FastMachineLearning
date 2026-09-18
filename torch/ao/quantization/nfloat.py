@@ -17,7 +17,7 @@ def quantize_nfloat20(x: torch.Tensor) -> torch.Tensor:
     Quantizes a floating-point tensor to NFloat20 (1 sign bit, 8 exponent bits, 11 mantissa bits).
     Provides superior precision compared to BF16 (7 mantissa bits) and FP16 (10 mantissa bits)
     while maintaining full FP32 dynamic range.
-    Uses ultra-fast vectorized float32 bit-level masking with round-to-nearest-even.
+    Uses vectorized float32 bit-level masking with round-to-nearest-even while preserving the sign bit.
     """
     if not x.is_floating_point():
         raise ValueError("quantize_nfloat20 requires floating point input tensor")
@@ -26,10 +26,15 @@ def quantize_nfloat20(x: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.to(torch.float32)
     x_int = x_fp32.view(torch.int32)
 
-    # 23 mantissa bits in FP32 vs 11 in NFloat20 => 12 bits to round/mask
-    # Round to nearest even: bit 11 bias and tie-breaking LSB bias
-    lsb_bias = (x_int >> 12) & 1
-    x_nfloat20 = ((x_int + 0x000007FF + lsb_bias) & 0xFFFFF000).view(torch.float32)
+    # Separate sign bit (bit 31) from magnitude bits (bits 0..30)
+    sign = x_int & 0x80000000
+    abs_int = x_int & 0x7FFFFFFF
+
+    # 23 mantissa bits in FP32 vs 11 in NFloat20 => lower 12 bits rounded and masked
+    lsb_bias = (abs_int >> 12) & 1
+    abs_rounded = (abs_int + 0x000007FF + lsb_bias) & 0x7FFFF000
+
+    x_nfloat20 = (sign | abs_rounded).view(torch.float32)
     return x_nfloat20.to(orig_dtype)
 
 
@@ -286,8 +291,7 @@ def nfloat4_quantize_ste(x: torch.Tensor, block_size: int = 64) -> torch.Tensor:
 class NFloat4Linear(nn.Module):
     """
     Memory-efficient and high-performance Linear layer storing weight parameters in 4-bit NFloat4
-    packed representation, delivering 75% memory bandwidth savings on weight loads for LLM inference and training.
-    Includes weight dequantization caching in evaluation mode for fast inference execution.
+    packed uint8 representation, delivering 75% memory bandwidth savings on weight loads for LLM inference and training.
     """
 
     def __init__(
@@ -305,6 +309,7 @@ class NFloat4Linear(nn.Module):
         self.block_size = block_size
         factory_kwargs = {"device": device, "dtype": dtype}
 
+        # Keep floating point weight parameter for training gradient updates
         self.weight = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
         )
@@ -313,6 +318,9 @@ class NFloat4Linear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        # Buffers for 4-bit packed weights and scales
+        self.register_buffer("packed_weight", None, persistent=False)
+        self.register_buffer("weight_scales", None, persistent=False)
         self._cached_w_dequant = None
         self.reset_parameters()
 
@@ -322,6 +330,15 @@ class NFloat4Linear(nn.Module):
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / (fan_in**0.5) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
+        self.pack_weights()
+
+    def pack_weights(self) -> None:
+        """Packs float weight parameters into 4-bit uint8 representation and scales."""
+        packed, scales, _ = quantize_nfloat4(
+            self.weight.data, block_size=self.block_size
+        )
+        self.packed_weight = packed
+        self.weight_scales = scales
         self._cached_w_dequant = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -329,12 +346,14 @@ class NFloat4Linear(nn.Module):
             w_dequant = nfloat4_quantize_ste(self.weight, block_size=self.block_size)
             self._cached_w_dequant = None
         else:
-            if (
-                self._cached_w_dequant is None
-                or self._cached_w_dequant.shape != self.weight.shape
-            ):
-                self._cached_w_dequant = nfloat4_quantize_ste(
-                    self.weight, block_size=self.block_size
+            if self._cached_w_dequant is None:
+                if self.packed_weight is None or self.weight_scales is None:
+                    self.pack_weights()
+                self._cached_w_dequant = dequantize_nfloat4(
+                    self.packed_weight,
+                    self.weight_scales,
+                    self.weight.shape,
+                    block_size=self.block_size,
                 )
             w_dequant = self._cached_w_dequant
 

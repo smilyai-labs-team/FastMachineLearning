@@ -2,14 +2,15 @@
 
 import sys
 from collections.abc import Callable
-from typing_extensions import TypeAliasType
 
 import torch
 from torch import Tensor
+from typing_extensions import TypeAliasType
 
 from .fake_quantize import *  # noqa: F403
 from .fuse_modules import fuse_modules, fuse_modules_qat
 from .fuser_method_mappings import *  # noqa: F403
+from .nfloat import *  # noqa: F403
 from .observer import *  # noqa: F403
 from .qconfig import *  # noqa: F403
 from .qconfig_mapping import *  # noqa: F403
@@ -160,6 +161,17 @@ __all__ = [
     "TorchAODType",
     "ZeroPointDomain",
     "get_block_size",
+    "quantize_nfloat20",
+    "dequantize_nfloat20",
+    "nfloat20_quantize_ste",
+    "NFloat20FakeQuantize",
+    "NFloat20Linear",
+    "quantize_nfloat4",
+    "dequantize_nfloat4",
+    "nfloat4_quantize_ste",
+    "NFloat4Linear",
+    "pack_uint4",
+    "unpack_uint4",
 ]
 
 
